@@ -4,11 +4,11 @@ using System;
 
 namespace ReedSolomonOnBytes
 {
-    public readonly ref struct GaloisField256
+    public readonly struct GaloisField256
     { 
-	    public readonly int Size;
+	    public readonly int Size; // Fixed at 2^8 since we want to operate only on bytes
 
-        private readonly ReadOnlySpan<byte> m_logarithms;
+        private readonly byte[] m_logarithms;
 
         private readonly byte[,] m_multTable;
 
@@ -26,23 +26,23 @@ namespace ReedSolomonOnBytes
             Inverses = BuildInverses();
         }
 
-        internal ReadOnlySpan<byte> Field { get; }
+        public byte[] Field { get; }
 
-        internal ReadOnlySpan<byte> Inverses { get; }
+        public byte[] Inverses { get; }
 
-        internal byte Multiply(byte left, byte right)
+        public byte Multiply(byte left, byte right)
         {
             return m_multTable[left, right];
         }
 
-        internal byte Divide(byte dividend, byte divisor)
+        public byte Divide(byte dividend, byte divisor)
         {
             return m_multTable[dividend, Inverses[divisor]];
         }
 
-        internal Span<byte> PolyMult(in ReadOnlySpan<byte> left, in ReadOnlySpan<byte> right)
+        public Span<byte> PolyMult(in ReadOnlySpan<byte> left, in ReadOnlySpan<byte> right)
         {
-	        var result = new byte[left.Length + right.Length - 1];
+	        Span<byte> result = new byte[left.Length + right.Length - 1];
 
             for(var leftIndex = 0; leftIndex < left.Length; ++leftIndex)
             {
@@ -55,7 +55,7 @@ namespace ReedSolomonOnBytes
             return result;
         }
 
-        internal byte PolyEval(in ReadOnlySpan<byte> poly, byte x)
+        public byte PolyEval(in ReadOnlySpan<byte> poly, byte x)
         {
 	        var sum = poly[0];
 
@@ -74,7 +74,7 @@ namespace ReedSolomonOnBytes
             return sum;
         }
 
-		private ReadOnlySpan<byte> BuildField(int fieldGenPoly)
+		private byte[] BuildField(int fieldGenPoly)
 		{
 			var field = new byte[Size];
 	        
@@ -97,7 +97,7 @@ namespace ReedSolomonOnBytes
             return field;
 		}
 
-        private ReadOnlySpan<byte> BuildLogarithms()
+        private byte[] BuildLogarithms()
         {
 	        var logarithms = new byte[Size];
 
@@ -124,7 +124,7 @@ namespace ReedSolomonOnBytes
             return table;
         }
 
-        private ReadOnlySpan<byte> BuildInverses()
+        private byte[] BuildInverses()
         {
 	        var inverses = new byte[Size];
 	        

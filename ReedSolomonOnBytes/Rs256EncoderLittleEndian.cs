@@ -4,31 +4,43 @@ using System;
 
 namespace ReedSolomonOnBytes
 {
-    public readonly ref struct Rs256EncoderLittleEndian // Little-Endian because byte message[0] is the highest mathematical message element
-    {
-	    private readonly int m_parityLength;
-        
-	    private readonly GaloisField256 m_gf;
-        private readonly ReadOnlySpan<byte> m_codeGenPoly;
+	public readonly struct Rs256EncoderLittleEndian // Little-Endian because byte message[0] is the highest mathematical message element
+	{
+		private readonly GaloisField256 m_gf;
+		private readonly byte[] m_codeGenPoly;
 
-		public Rs256EncoderLittleEndian(int codewordLength, int messageLength, in GaloisField256 gf) 
-        {
-            m_parityLength = codewordLength - messageLength;
+		public Rs256EncoderLittleEndian(int codewordLength, int messageLength, in GaloisField256 gf)
+		{
+			CodewordLength = codewordLength;
+			MessageLength = messageLength;
 
-            m_gf = gf;
+			ParityLength = codewordLength - messageLength;
 
-            m_codeGenPoly = default;
-            m_codeGenPoly = BuildCodeGenPoly();
-        }
+			m_gf = gf;
 
-        public void CalculateParity(in ReadOnlySpan<byte> message, Span<byte> parityOut)
+			m_codeGenPoly = default;
+			m_codeGenPoly = BuildCodeGenPoly();
+		}
+
+		public int ParityLength { get; }
+        public int CodewordLength { get; }
+        public int MessageLength { get; }
+
+		public void CalculateParity(in ReadOnlySpan<byte> message, in Span<byte> parityOut)
         {
             parityOut.Fill(0);
 
+            if (message.Length < 1)
+            {
+                return;
+            }
+
 	        byte r;
 	        byte z_0 = 0;
+
+	        var iterationCount = message.Length - 1;
 	        
-            for(var i = 0; i < message.Length - 1; ++i)
+            for(var i = 0; i < iterationCount; ++i)
             {
                 r = (byte)(z_0 ^ message[i]);
 
@@ -55,9 +67,9 @@ namespace ReedSolomonOnBytes
             }
         }
 
-        private Span<byte> BuildCodeGenPoly()
+        private byte[] BuildCodeGenPoly()
         {
-	        var polys = new byte[m_parityLength][];
+	        var polys = new byte[ParityLength][];
 
             // Build the degree-1 polynomials (we need 2t = numElements of them).
             // Eg 2t = 4, need four of them:
@@ -67,19 +79,19 @@ namespace ReedSolomonOnBytes
             //   (x + 8) is {8, 1}
 
             // Remember that field[0] is 0, field[1] is a^0.
-            for (var i = 0; i < m_parityLength; ++i)
+            for (var i = 0; i < ParityLength; ++i)
             {
                 polys[i] = new byte[] { m_gf.Field[i + 1], 1 };
             }
 
             // Multiply them one at a time to produce the field generator poly.
             var current = polys[0].AsSpan();
-            for (var i = 1; i < m_parityLength; ++i)
+            for (var i = 1; i < ParityLength; ++i)
             {
                 current = m_gf.PolyMult(current, polys[i]);
             }
 
-            return current;
+            return current.ToArray();
         }
     }
 }

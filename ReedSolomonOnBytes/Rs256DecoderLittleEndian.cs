@@ -1,47 +1,45 @@
 ﻿//Note: the original version of this code comes from https://github.com/antiduh/ErrorCorrection.git
-
 using System;
+using System.Runtime.CompilerServices;
 
 namespace ReedSolomonOnBytes
 {
-    public readonly ref struct Rs256DecoderLittleEndian // Little-Endian because byte message[0] is the highest mathematical message element
+    public readonly struct Rs256DecoderLittleEndian // Little-Endian because byte message[0] is the highest mathematical message element
     {
         private readonly GaloisField256 m_gf;
-		private readonly int m_parityLength;
+		
+        private readonly byte[] m_syndroms;
 
-        private readonly Span<byte> m_syndroms;
+        private readonly byte[] m_lambda;
+        
+        private readonly byte[] m_lambdaPrime;
 
-        private readonly Span<byte> m_lambda;
-        private readonly Span<byte> m_corrPoly;
-        private readonly Span<byte> m_lambdaStar;
+        private readonly byte[] m_omega;
 
-        private readonly Span<byte> m_lambdaPrime;
-
-        private readonly Span<byte> m_omega;
-
-        private readonly Span<byte> m_errorIndexes;
-
-        private readonly Span<byte> m_chienCache;
+        private readonly byte[] m_errorIndexes;
+        
+        private readonly byte[] m_chienCache;
 
         public Rs256DecoderLittleEndian(int codewordLength, int messageLength, in GaloisField256 gf)
         {
-			m_parityLength = codewordLength - messageLength;
+	        CodewordLength = codewordLength;
+	        MessageLength = messageLength;
 
+	        ParityLength = codewordLength - messageLength;
+			
             m_gf = gf;
 
             // Syndrom calculation buffers
-            m_syndroms = new byte[m_parityLength];
+            m_syndroms = new byte[ParityLength];
 
             // Lamda calculation buffers
-            m_lambda = new byte[m_parityLength - 1];
-            m_corrPoly = new byte[m_parityLength - 1];
-            m_lambdaStar = new byte[m_parityLength - 1];
-
+            m_lambda = new byte[ParityLength - 1];
+            
             // LambdaPrime calculation buffers
-            m_lambdaPrime = new byte[m_parityLength - 2];
+            m_lambdaPrime = new byte[ParityLength - 2];
 
             // Omega calculation buffers
-            m_omega = new byte[m_parityLength - 2];
+            m_omega = new byte[ParityLength - 2];
             
             // Error position calculation
             m_errorIndexes = new byte[codewordLength];
@@ -49,89 +47,133 @@ namespace ReedSolomonOnBytes
             // Cache of the lookup used in the ChienSearch process.
             m_chienCache = new byte[codewordLength];
 
-            for(var i = 0; i < m_chienCache.Length; i++)
+            for(var i = 0; i < m_chienCache.Length; ++i)
             {
                 m_chienCache[i] = m_gf.Inverses[m_gf.Field[i + 1]];
             }
         }
 
-		public void CorrectInPlace(in Span<byte> messageAndParity)
-        {
-            CalcSyndromPoly(messageAndParity);
-            CalcLambda();
-            CalcLambdaPrime();
-            CalcOmega();
+        public int ParityLength { get; }
+        public int CodewordLength { get; }
+        public int MessageLength { get; }
 
-            ChienSearch();
+		public int CorrectInPlace(in Span<byte> messageAndParity)
+		{
+			if (messageAndParity.Length == 0)
+			{
+				return 0;
+			}
 
-            RepairErrors(messageAndParity, m_errorIndexes, m_omega, m_lambdaPrime);
+			var errorIndexes = GetErrorIndexes(messageAndParity);
+
+            return errorIndexes.Length > 0 ? RepairErrors(messageAndParity, errorIndexes, m_omega, m_lambdaPrime) : 0;
         }
 
-        private void RepairErrors(Span<byte> messageAndParity, in ReadOnlySpan<byte> errorIndexes, in ReadOnlySpan<byte> omega, in ReadOnlySpan<byte> lp)
+		private int RepairErrors(in Span<byte> messageAndParity, in ReadOnlySpan<byte> errorIndexes, in ReadOnlySpan<byte> omega, in ReadOnlySpan<byte> lp)
         {
-	        var messageLen = messageAndParity.Length;
+			var messageLen = messageAndParity.Length;
 
-            for(var i = 0; i < messageLen; i++)
+	        var repairedBitCount = 0;
+
+	        var corrections = new Rs256Algorithms.FixedList<(byte errorIndex, byte xorValue)>(stackalloc (byte errorIndex, byte xorValue)[CodewordLength]);
+
+            GetCorrections(messageAndParity.Length, errorIndexes, omega, lp, ref corrections);
+
+            foreach (var error in corrections)
             {
-	            if (errorIndexes[i] != 0)
-	            {
-		            continue;
-	            }
+	            var repairingValue = error.xorValue;
 
-	            var x = m_gf.Field[i + 1];
-
-	            var xInverse = m_gf.Inverses[x];
-
-	            var top = m_gf.PolyEval(omega, xInverse);
-	            top = m_gf.Multiply(top, x);
-	            var bottom = m_gf.PolyEval(lp, xInverse);
+	            repairedBitCount += PopulationCount(repairingValue);
                     
-	            messageAndParity[messageLen - 1 - i] ^= m_gf.Divide(top, bottom);
+	            messageAndParity[messageLen - 1 - error.errorIndex] ^= repairingValue;
             }
+
+            return repairedBitCount;
         }
+
+		private void GetCorrections(int messageLen, in ReadOnlySpan<byte> errorIndexes, in ReadOnlySpan<byte> omega, in ReadOnlySpan<byte> lp, ref Rs256Algorithms.FixedList<(byte errorIndex, byte xorValue)> corrections)
+		{
+			foreach (var errorIndex in errorIndexes)
+			{
+				if (errorIndex >= messageLen)
+				{
+					continue; // repair would occur in leading 0 bytes
+				}
+
+				var x = m_gf.Field[errorIndex + 1];
+
+				var xInverse = m_gf.Inverses[x];
+
+				var top = m_gf.PolyEval(omega, xInverse);
+
+				top = m_gf.Multiply(top, x);
+	            
+				var bottom = m_gf.PolyEval(lp, xInverse);
+
+				var repairingValue = m_gf.Divide(top, bottom);
+
+				corrections.Add((errorIndex, repairingValue));
+			}
+		}
+
+		private ReadOnlySpan<byte> GetErrorIndexes(in ReadOnlySpan<byte> messageAndParity)
+		{
+			CalcSyndromPoly(messageAndParity);
+			CalcLambda();
+			CalcLambdaPrime();
+			CalcOmega();
+
+			return ChienSearch();
+		}
 
         private void CalcLambda()
         {
-	        // --- Initial conditions ----
-            // Need to clear lambda and corrPoly, but not lambdaStar. lambda and corrPoly 
-            // are used and initialized iteratively in the algorithm, whereas lambdaStar isn't.
-            m_corrPoly.Fill(0);
-            m_lambda.Fill(0);
+            // Need to clear lambda 
+            Span<byte> lambda = m_lambda;
+            lambda.Fill(0);
+            lambda[0] = 1;
             
-            var k = 1;
+            Span<byte> corrPoly = stackalloc byte[ParityLength - 1];
+            corrPoly[1] = 1;
+			
             var l = 0;
-            m_corrPoly[1] = 1;
-            m_lambda[0] = 1;
             
-            while(k <= m_parityLength)
+            Span<byte> lambdaStar = stackalloc byte[ParityLength - 1];
+            
+            for(var k = 1; k <= ParityLength; ++k)
             {            
                 // --- Calculate e ---
                 var e = m_syndroms[k - 1];
 
-                for(var i = 1; i <= l; i++)
+                for(var i = 1; i <= l; ++i)
                 {
-                    e ^= m_gf.Multiply(m_lambda[i], m_syndroms[k - 1 - i]);
+                    e ^= m_gf.Multiply(lambda[i], m_syndroms[k - 1 - i]);
                 }
 
                 // --- Update estimate if e != 0 ---
                 if(e != 0)
                 {
                     // D*(x) = D(x) + e * C(x);
-                    for(var i = 0; i < m_lambdaStar.Length; i++)
+                    for(var i = 0; i < lambdaStar.Length; ++i)
                     {
-                        m_lambdaStar[i] = (byte)(m_lambda[i] ^ m_gf.Multiply(e, m_corrPoly[i]));
+                        lambdaStar[i] = (byte)(lambda[i] ^ m_gf.Multiply(e, corrPoly[i]));
                     }
 
                     if(2 * l < k)
                     {
-                        // L = K - L;
+	                    // L = K - L;
                         l = k - l;
+
+                        if (l >= lambda.Length)
+                        {
+	                        l = lambda.Length - 1;
+                        }
 
                         // C(x) = D(x) * e^(-1);
                         var eInv = m_gf.Inverses[e]; // temp to store calculation of 1 / e aka e^(-1)
-                        for(var i = 0; i < m_corrPoly.Length; i++)
+                        for(var i = 0; i < corrPoly.Length; ++i)
                         {
-                            m_corrPoly[i] = m_gf.Multiply(m_lambda[i], eInv);
+                            corrPoly[i] = m_gf.Multiply(lambda[i], eInv);
                         }
                     }
                 }
@@ -139,20 +181,18 @@ namespace ReedSolomonOnBytes
                 // --- Advance C(x) ---
 
                 // C(x) = C(x) * x
-                for(var i = m_corrPoly.Length - 1; i >= 1; i--)
+                for(var i = corrPoly.Length - 1; i >= 1; i--)
                 {
-                    m_corrPoly[i] = m_corrPoly[i - 1];
+                    corrPoly[i] = corrPoly[i - 1];
                 }
 
-                m_corrPoly[0] = 0;
+                corrPoly[0] = 0;
 
                 if(e != 0)
                 {
                     // D(x) = D*(x);
-                    m_lambdaStar.CopyTo(m_lambda);
+                    lambdaStar.CopyTo(lambda);
                 }
-
-                k += 1;
             }
         }
 
@@ -163,7 +203,7 @@ namespace ReedSolomonOnBytes
             
             // No need to clear this.lambdaPrime between calls; full assignment is done every call.
 
-            for(var i = 0; i < m_lambdaPrime.Length; i++)
+            for(var i = 0; i < m_lambdaPrime.Length; ++i)
             {
                 if((i & 0x1) == 0)
                 {
@@ -178,7 +218,7 @@ namespace ReedSolomonOnBytes
 
         private void CalcOmega()
         {
-            for (var i = 0; i < m_omega.Length; i++)
+            for (var i = 0; i < m_omega.Length; ++i)
             {
                 m_omega[i] = m_syndroms[i];
 
@@ -189,15 +229,28 @@ namespace ReedSolomonOnBytes
             }
         }
 
-        private void ChienSearch()
+        private ReadOnlySpan<byte> ChienSearch()
         {
-            for(var i = 0; i < m_errorIndexes.Length; i++)
+	        var errorIndexCount = 0;
+
+	        ReadOnlySpan<byte> chienCache = m_chienCache;
+
+            for(var i = 0; i < chienCache.Length; ++i)
             {
-                m_errorIndexes[i] = m_gf.PolyEval(
-                    m_lambda,
-                    m_chienCache[i]
-               );
+	            var error = m_gf.PolyEval(
+		            m_lambda,
+		            chienCache[i]
+	            );
+
+	            if (error != 0)
+	            {
+                    continue;
+	            }
+
+	            m_errorIndexes[errorIndexCount++] = (byte)i;
             }
+
+            return new ReadOnlySpan<byte>(m_errorIndexes, 0, errorIndexCount);
         }
         
         private void CalcSyndromPoly(in ReadOnlySpan<byte> message)
@@ -221,6 +274,14 @@ namespace ReedSolomonOnBytes
 
                 m_syndroms[synIndex] = (byte)(syndrome ^ message[message.Length - 1]);
             }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int PopulationCount(byte x)
+        {
+	        var x1 = x - (x >> 1 & 0b1010101);
+	        var x2 = (x1 >> 2 & 0b110011) + (x1 & 0b110011);
+	        return (x2 >> 4) + (x2 & 0b1111);
         }
     }
 }
